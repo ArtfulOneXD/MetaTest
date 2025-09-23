@@ -20,45 +20,32 @@ async function sendText(psid, text) {
     body: JSON.stringify(body),
   });
   if (!r.ok) {
-    const t = await r.text();
+    const t = await r.text().catch(() => "");
     console.error("Send API error:", r.status, t);
   }
 }
 
-// --- Ask OpenAI (fallback to echo if no key provided)
-// --- Ask OpenAI with a business-specific system prompt
+// --- Ask OpenAI (Chat Completions) with a business-specific system prompt
 async function askOpenAI(userText) {
   if (!OPENAI_API_KEY) return `Echo: ${userText}`;
 
   const systemPrompt = `
-You are the AI assistant for **Handyman Grace Company**, a handyman/home-repair service in **Sacramento County, CA**.
-Tone: friendly, brief, and confident. Keep replies to 2–5 sentences unless the user asks for detail.
-
-What we do (examples): general repairs and maintenance, fence repair, painting, assembly, and small-to-medium home improvement tasks.
-Pricing: do NOT guess prices. If asked, say you can give a ballpark only after a few details.
-
-Primary goals:
-1) Answer questions clearly using only what we know—do not invent unavailable services, promises, or exact prices.
-2) If the user seems like a lead (asking for work, estimate, availability, or onsite help), politely gather:
-   - Name
-   - Best contact (phone/email)
-   - Address or area in Sacramento
-   - Task description (photos/links if any)
-   - Timing (preferred date/time)
-   - Budget (optional)
-   Then offer to pass it to the team now.
-3) If they ask for something we don't do, suggest nearby alternatives within typical handyman scope (e.g., “for major structural or permitting work, a licensed GC may be required”).
-4) If they ask for emergency help, advise calling local emergency services.
-
-Contact info you may share when asked:
-- Phone: (916) 769-2889 or (916) 281-7178.
-- Service area: Sacramento County, CA.
-
-Formatting:
-- For lead collection, finish with a short checklist so the user can reply inline.
+You are the AI assistant for Handyman Grace Company, a handyman/home-repair service in Sacramento County, CA.
+Tone: friendly, brief, confident. Keep replies to 2–5 sentences.
+Do not guess exact prices. If asked for price, say you can give a ballpark after a few details.
+If the user seems like a lead (estimate/availability/onsite), politely collect:
+- Name
+- Best contact (phone/email)
+- Address/area in Sacramento
+- Task description (photos/links if any)
+- Timing (preferred date/time)
+- Budget (optional)
+Then offer to pass it to the team now.
+If it’s outside typical handyman scope, suggest contacting a licensed GC. For emergencies, advise calling local emergency services.
+If asked, you may share: (916) 769-2889 or (916) 281-7178.
 `;
 
-  const r = await fetch("https://api.openai.com/v1/responses", {
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -66,23 +53,25 @@ Formatting:
     },
     body: JSON.stringify({
       model: "gpt-4.1-mini",
-      input: [
+      messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userText }
+        { role: "user", content: userText },
       ],
+      temperature: 0.5,
+      max_tokens: 300,
     }),
   });
 
   if (!r.ok) {
-    const errText = await r.text().catch(() => "");
-    console.error("OpenAI error:", r.status, errText);
-    return "Sorry, I hit a snag. Please try again in a moment.";
+    const t = await r.text().catch(() => "");
+    console.error("OpenAI error:", r.status, t);
+    return "[ai-error] Sorry, I hit a snag. Please try again.";
   }
 
   const data = await r.json().catch(() => ({}));
-  return data?.output_text || "…";
+  const out = data?.choices?.[0]?.message?.content;
+  return out ? `[ai] ${out}` : "[ai-empty] …";
 }
-
 
 export default async function handler(req, res) {
   // 1) Webhook verification handshake (Meta sends GET)
@@ -99,8 +88,8 @@ export default async function handler(req, res) {
   // 2) Webhook events (Meta sends POST)
   if (req.method === "POST") {
     try {
-      const body = req.body;
-      if (body?.object === "page") {
+      const body = req.body || {};
+      if (body.object === "page") {
         for (const entry of body.entry || []) {
           for (const evt of entry.messaging || []) {
             const psid = evt.sender?.id;
@@ -117,6 +106,7 @@ export default async function handler(req, res) {
       return res.status(404).send("Not Found");
     } catch (e) {
       console.error("Webhook handler error:", e);
+      // Still 200 so Meta doesn't keep retrying
       return res.status(200).send("EVENT_RECEIVED");
     }
   }
