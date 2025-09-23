@@ -70,7 +70,7 @@ If asked, you may share: (916) 769-2889 or (916) 281-7178.
 
   const data = await r.json().catch(() => ({}));
   const out = data?.choices?.[0]?.message?.content;
-  return out ? `[ai] ${out}` : "[ai-empty] …";
+  return out || "…";
 }
 
 export default async function handler(req, res) {
