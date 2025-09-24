@@ -4,6 +4,9 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const META_PAGE_TOKEN = process.env.META_PAGE_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// --- In-memory conversation memory
+let conversationMemory = {}; // { psid: [{role, content}, ...] }
+
 // --- Send a text reply back to the user via Facebook Send API
 async function sendText(psid, text) {
   const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${encodeURIComponent(
@@ -25,14 +28,14 @@ async function sendText(psid, text) {
   }
 }
 
-// --- Ask OpenAI (Chat Completions) with a business-specific system prompt
-async function askOpenAI(userText) {
+// --- Ask OpenAI (Chat Completions) with memory support
+async function askOpenAI(psid, userText) {
   if (!OPENAI_API_KEY) return `Echo: ${userText}`;
 
   const systemPrompt = `
-You are the AI assistant for Handyman Grace Company, a handyman/home-repair service in Sacramento County, CA.
+You are the assistant for Handyman Grace Company, a handyman/home-repair service in Sacramento County, CA.
 Tone: friendly, brief, confident. Keep replies to 2–5 sentences.
-Do not guess exact prices. If asked for price, say you can give a ballpark after a few details.
+Do not guess exact prices. If asked for price, say you can give a ballpark after a few details. But if the user insists (means asking a few times or cursing) give general prices.
 If the user seems like a lead (estimate/availability/onsite), politely collect:
 - Name
 - Best contact (phone/email)
@@ -45,6 +48,50 @@ If it’s outside typical handyman scope, suggest contacting a licensed GC. For 
 If asked, you may share: (916) 769-2889 or (916) 281-7178.
 `;
 
+  // --- Initialize memory for this user
+  if (!conversationMemory[psid]) conversationMemory[psid] = [];
+
+  // --- Append new user message
+  conversationMemory[psid].push({ role: "user", content: userText });
+
+  // --- Summarize older messages if memory exceeds 10
+  if (conversationMemory[psid].length > 10) {
+    const oldMessages = conversationMemory[psid].slice(0, -10);
+    const summaryPrompt = `Summarize the following conversation in 2-3 sentences for context: 
+${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
+
+    const summaryRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        messages: [{ role: "system", content: summaryPrompt }],
+        temperature: 0.5,
+        max_tokens: 150,
+      }),
+    });
+
+    const summaryData = await summaryRes.json().catch(() => ({}));
+    const summaryText = summaryData?.choices?.[0]?.message?.content || "Summary unavailable.";
+
+    // Keep summary + last 10 messages
+    conversationMemory[psid] = [
+      { role: "system", content: summaryText },
+      ...conversationMemory[psid].slice(-10),
+    ];
+  }
+
+  // --- Prepare messages for OpenAI
+  const messagesToSend = [
+    { role: "system", content: systemPrompt },
+    ...(conversationMemory[psid] || []),
+    { role: "user", content: userText },
+  ];
+
+  // --- Call OpenAI
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -53,10 +100,7 @@ If asked, you may share: (916) 769-2889 or (916) 281-7178.
     },
     body: JSON.stringify({
       model: "gpt-4.1-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userText },
-      ],
+      messages: messagesToSend,
       temperature: 0.5,
       max_tokens: 300,
     }),
@@ -70,11 +114,15 @@ If asked, you may share: (916) 769-2889 or (916) 281-7178.
 
   const data = await r.json().catch(() => ({}));
   const out = data?.choices?.[0]?.message?.content;
+
+  // --- Append assistant response to memory
+  conversationMemory[psid].push({ role: "assistant", content: out || "…" });
+
   return out || "…";
 }
 
 export default async function handler(req, res) {
-  // 1) Webhook verification handshake (Meta sends GET)
+  // --- Webhook verification handshake (Meta sends GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -85,7 +133,7 @@ export default async function handler(req, res) {
     return res.status(403).send("Verification failed");
   }
 
-  // 2) Webhook events (Meta sends POST)
+  // --- Webhook events (Meta sends POST)
   if (req.method === "POST") {
     try {
       const body = req.body || {};
@@ -95,18 +143,16 @@ export default async function handler(req, res) {
             const psid = evt.sender?.id;
             const text = evt.message?.text || evt.postback?.payload;
             if (psid && text) {
-              const reply = await askOpenAI(text);
+              const reply = await askOpenAI(psid, text);
               await sendText(psid, reply);
             }
           }
         }
-        // MUST reply in <=20s or Meta retries
         return res.status(200).send("EVENT_RECEIVED");
       }
       return res.status(404).send("Not Found");
     } catch (e) {
       console.error("Webhook handler error:", e);
-      // Still 200 so Meta doesn't keep retrying
       return res.status(200).send("EVENT_RECEIVED");
     }
   }
