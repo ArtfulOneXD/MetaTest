@@ -3,7 +3,7 @@
 import fetch from "node-fetch";
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const DATABASE_ID = process.env.NOTION_DATABASE_ID;
+const DATABASE_ID = process.env.NOTION_DATABASE_ID?.trim(); // trim to remove whitespace/newlines
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 if (!NOTION_TOKEN || !DATABASE_ID || !OPENAI_API_KEY) {
