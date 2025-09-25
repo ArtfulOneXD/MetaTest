@@ -1,4 +1,9 @@
-// Vercel Serverless Function – Messenger ↔ OpenAI bridge
+// Vercel Serverless Function – Messenger ↔ OpenAI ↔ Notion bridge
+
+import fetch from "node-fetch";
+import {
+  saveConversationIfTaskExists
+} from "./notion.js"; // Make sure notion.js is in the same folder
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const META_PAGE_TOKEN = process.env.META_PAGE_TOKEN;
@@ -6,6 +11,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // --- In-memory conversation memory
 let conversationMemory = {}; // { psid: [{role, content}, ...] }
+let inactivityTimers = {};   // { psid: Timeout }
 
 // --- Send a text reply back to the user via Facebook Send API
 async function sendText(psid, text) {
@@ -35,32 +41,63 @@ async function askOpenAI(psid, userText) {
   const systemPrompt = `
 You are the assistant for Handyman Grace Company, a handyman/home-repair service in Sacramento County, CA.
 Tone: friendly, brief, confident. Keep replies to 2–5 sentences.
-Do not guess exact prices. If asked for price, say you can give a ballpark after a few details. But if the user insists (means asking a few times or cursing) give general prices.
-If the user seems like a lead (estimate/availability/onsite), politely collect:
+Do not guess exact prices. If asked for price, say you can give a ballpark after a few details. But if the user insists, give general prices.
+If the user seems like a lead, politely collect:
 - Name
 - Best contact (phone/email)
 - Address/area in Sacramento
 - Task description (photos/links if any)
 - Timing (preferred date/time)
 - Budget (optional)
-Then offer to pass it to the team now.
+Then offer to pass it to the team.
 If it’s outside typical handyman scope, suggest contacting a licensed GC. For emergencies, advise calling local emergency services.
 If asked, you may share: (916) 769-2889 or (916) 281-7178.
 `;
 
-  // --- Initialize memory for this user
   if (!conversationMemory[psid]) conversationMemory[psid] = [];
-
-  // --- Append new user message
   conversationMemory[psid].push({ role: "user", content: userText });
 
-  // --- Summarize older messages if memory exceeds 10
+  // Summarize older messages if memory exceeds 10
   if (conversationMemory[psid].length > 10) {
     const oldMessages = conversationMemory[psid].slice(0, -10);
     const summaryPrompt = `Summarize the following conversation in 2-3 sentences for context: 
 ${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
 
-    const summaryRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    try {
+      const summaryRes = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          messages: [{ role: "system", content: summaryPrompt }],
+          temperature: 0.5,
+          max_tokens: 150,
+        }),
+      });
+
+      const summaryData = await summaryRes.json().catch(() => ({}));
+      const summaryText = summaryData?.choices?.[0]?.message?.content || "Summary unavailable.";
+      conversationMemory[psid] = [
+        { role: "system", content: summaryText },
+        ...conversationMemory[psid].slice(-10),
+      ];
+    } catch (e) {
+      console.error("OpenAI summary error:", e);
+    }
+  }
+
+  // Prepare messages for OpenAI
+  const messagesToSend = [
+    { role: "system", content: systemPrompt },
+    ...(conversationMemory[psid] || []),
+    { role: "user", content: userText },
+  ];
+
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -68,72 +105,51 @@ ${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
-        messages: [{ role: "system", content: summaryPrompt }],
+        messages: messagesToSend,
         temperature: 0.5,
-        max_tokens: 150,
+        max_tokens: 300,
       }),
     });
 
-    const summaryData = await summaryRes.json().catch(() => ({}));
-    const summaryText = summaryData?.choices?.[0]?.message?.content || "Summary unavailable.";
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      console.error("OpenAI error:", r.status, t);
+      return "[ai-error] Sorry, I hit a snag. Please try again.";
+    }
 
-    // Keep summary + last 10 messages
-    conversationMemory[psid] = [
-      { role: "system", content: summaryText },
-      ...conversationMemory[psid].slice(-10),
-    ];
+    const data = await r.json().catch(() => ({}));
+    const out = data?.choices?.[0]?.message?.content;
+    conversationMemory[psid].push({ role: "assistant", content: out || "…" });
+
+    return out || "…";
+  } catch (e) {
+    console.error("OpenAI request failed:", e);
+    return "[ai-error] Request failed";
   }
-
-  // --- Prepare messages for OpenAI
-  const messagesToSend = [
-    { role: "system", content: systemPrompt },
-    ...(conversationMemory[psid] || []),
-    { role: "user", content: userText },
-  ];
-
-  // --- Call OpenAI
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      messages: messagesToSend,
-      temperature: 0.5,
-      max_tokens: 300,
-    }),
-  });
-
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    console.error("OpenAI error:", r.status, t);
-    return "[ai-error] Sorry, I hit a snag. Please try again.";
-  }
-
-  const data = await r.json().catch(() => ({}));
-  const out = data?.choices?.[0]?.message?.content;
-
-  // --- Append assistant response to memory
-  conversationMemory[psid].push({ role: "assistant", content: out || "…" });
-
-  return out || "…";
 }
 
+// --- Save conversation after inactivity
+function scheduleNotionSave(psid) {
+  if (inactivityTimers[psid]) clearTimeout(inactivityTimers[psid]);
+  inactivityTimers[psid] = setTimeout(async () => {
+    const conv = conversationMemory[psid]?.map(m => `${m.role}: ${m.content}`).join("\n") || "";
+    if (conv) {
+      console.log(`Saving conversation for PSID ${psid} to Notion...`);
+      await saveConversationIfTaskExists(conv, psid);
+    }
+  }, 60_000); // 1 minute inactivity
+}
+
+// --- Webhook handler
 export default async function handler(req, res) {
-  // --- Webhook verification handshake (Meta sends GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
-    }
+    if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
     return res.status(403).send("Verification failed");
   }
 
-  // --- Webhook events (Meta sends POST)
   if (req.method === "POST") {
     try {
       const body = req.body || {};
@@ -145,6 +161,7 @@ export default async function handler(req, res) {
             if (psid && text) {
               const reply = await askOpenAI(psid, text);
               await sendText(psid, reply);
+              scheduleNotionSave(psid); // schedule Notion save after inactivity
             }
           }
         }
