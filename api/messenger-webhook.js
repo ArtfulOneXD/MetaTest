@@ -1,7 +1,7 @@
 // messenger-webhook.js – Messenger ↔ OpenAI + Notion integration
 
 import fetch from "node-fetch";
-import { saveConversationIfTaskExists } from "./notion.js"; // <-- Import Notion function
+import { saveConversationIfTaskExists } from "./notion.js"; // <-- Import updated Notion functions
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const META_PAGE_TOKEN = process.env.META_PAGE_TOKEN;
@@ -51,13 +51,10 @@ If it’s outside typical handyman scope, suggest contacting a licensed GC. For 
 If asked, you may share: (916) 769-2889 or (916) 281-7178.
 `;
 
-  // --- Initialize memory for this user
   if (!conversationMemory[psid]) conversationMemory[psid] = [];
-
-  // --- Append new user message
   conversationMemory[psid].push({ role: "user", content: userText });
 
-  // --- Summarize older messages if memory exceeds 10
+  // Summarize old messages if memory exceeds 10
   if (conversationMemory[psid].length > 10) {
     const oldMessages = conversationMemory[psid].slice(0, -10);
     const summaryPrompt = `Summarize the following conversation in 2-3 sentences for context: 
@@ -79,22 +76,18 @@ ${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
 
     const summaryData = await summaryRes.json().catch(() => ({}));
     const summaryText = summaryData?.choices?.[0]?.message?.content || "Summary unavailable.";
-
-    // Keep summary + last 10 messages
     conversationMemory[psid] = [
       { role: "system", content: summaryText },
       ...conversationMemory[psid].slice(-10),
     ];
   }
 
-  // --- Prepare messages for OpenAI
   const messagesToSend = [
     { role: "system", content: systemPrompt },
     ...(conversationMemory[psid] || []),
     { role: "user", content: userText },
   ];
 
-  // --- Call OpenAI
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -117,8 +110,6 @@ ${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
 
   const data = await r.json().catch(() => ({}));
   const out = data?.choices?.[0]?.message?.content;
-
-  // --- Append assistant response to memory
   conversationMemory[psid].push({ role: "assistant", content: out || "…" });
 
   return out || "…";
@@ -126,7 +117,6 @@ ${oldMessages.map(m => m.role + ": " + m.content).join("\n")}`;
 
 // --- Webhook handler
 export default async function handler(req, res) {
-  // --- Webhook verification handshake (Meta sends GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -137,7 +127,6 @@ export default async function handler(req, res) {
     return res.status(403).send("Verification failed");
   }
 
-  // --- Webhook events (Meta sends POST)
   if (req.method === "POST") {
     try {
       const body = req.body || {};
@@ -154,10 +143,17 @@ export default async function handler(req, res) {
               // 2️⃣ Send reply to user
               await sendText(psid, reply);
 
-              // 3️⃣ Save conversation to Notion (non-blocking)
-              saveConversationIfTaskExists(text, psid)
-                .then(() => console.log("Saved conversation to Notion"))
-                .catch(err => console.error("Failed to save conversation to Notion", err));
+              // 3️⃣ Save conversation to Notion (awaited properly)
+              try {
+                const notionResult = await saveConversationIfTaskExists(text, psid);
+                if (notionResult) {
+                  console.log("Saved conversation to Notion:", notionResult);
+                } else {
+                  console.log("Notion save skipped (no task).");
+                }
+              } catch (err) {
+                console.error("Failed to save conversation to Notion", err);
+              }
             }
           }
         }
