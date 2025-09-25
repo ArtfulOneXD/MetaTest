@@ -1,9 +1,9 @@
-// notion.js – analyze chats and save to Notion (fixed for your DB)
+// notion.js – analyze chats and save to Notion (updated for your DB)
 
 import fetch from "node-fetch";
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const DATABASE_ID = process.env.NOTION_DATABASE_ID?.trim();
+const DATABASE_ID = process.env.NOTION_DATABASE_ID?.trim(); // trim to remove whitespace/newlines
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 if (!NOTION_TOKEN || !DATABASE_ID || !OPENAI_API_KEY) {
@@ -58,6 +58,7 @@ export async function saveConversationToNotion({
 
     const text = await res.text();
     if (!res.ok) console.error("Notion API error:", res.status, text);
+    else console.log("Saved conversation to Notion"); // log for success
     return text;
   } catch (e) {
     console.error("Notion request failed:", e);
