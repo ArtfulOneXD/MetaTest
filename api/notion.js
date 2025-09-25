@@ -1,9 +1,9 @@
-// notion.js – analyze chats and save to Notion (updated robustly for your DB)
+// notion.js – analyze chats and save to Notion (fixed for DB types)
 
 import fetch from "node-fetch";
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const DATABASE_ID = process.env.NOTION_DATABASE_ID?.trim();
+const DATABASE_ID = process.env.NOTION_DATABASE_ID?.trim(); // remove whitespace/newlines
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 if (!NOTION_TOKEN || !DATABASE_ID || !OPENAI_API_KEY) {
@@ -31,8 +31,8 @@ export async function saveConversationToNotion({
     parent: { database_id: DATABASE_ID },
     properties: {
       "Client Name": { title: [{ text: { content: clientName } }] },
-      "Contact Phone": { rich_text: [{ text: { content: contactPhone } }] },
-      "Contact Email": { rich_text: [{ text: { content: contactEmail } }] },
+      "Contact Phone": { phone_number: contactPhone },
+      "Contact Email": { email: contactEmail },
       "Location": { rich_text: [{ text: { content: location } }] },
       "Task": { rich_text: [{ text: { content: task } }] },
       "Description": { rich_text: [{ text: { content: description } }] },
@@ -68,25 +68,19 @@ export async function saveConversationToNotion({
 // --- Analyze conversation using OpenAI
 export async function analyzeConversation(conversationText, psid) {
   const prompt = `
-You are an assistant for a handyman company.
-Analyze the conversation below and extract information exactly as these JSON keys:
-{
-  "Client Name": "",
-  "Contact Phone": "",
-  "Contact Email": "",
-  "Location": "",
-  "Task": "",
-  "Description": "",
-  "Conversation Summary": "",
-  "Time": ""
-}
+You are analyzing a handyman chat conversation.
+Extract these fields exactly as they appear in the Notion DB:
 
-- Ensure each field is always present, even if blank.
-- Task should be extracted from any user request describing a job (mount, repair, install, etc.)
-- Conversation Summary should be 1–2 sentences summarizing the request.
-- Time: current ISO timestamp if not mentioned in conversation.
-- Return JSON only, no extra text.
+- Client Name
+- Contact Phone
+- Contact Email
+- Location
+- Task
+- Description
+- Conversation Summary (1-2 sentences)
+- Time (ISO format if possible)
 
+Return JSON only with these keys. Leave blank if missing. No extra text.
 Conversation:
 ${conversationText}
 `;
@@ -155,10 +149,13 @@ ${conversationText}
   }
 }
 
-// --- Save to Notion even if task is empty (you can decide later)
+// --- Save to Notion only if Task exists
 export async function saveConversationIfTaskExists(conversationText, psid) {
   const analyzedData = await analyzeConversation(conversationText, psid);
-  if (analyzedData) {
+  if (analyzedData && analyzedData.task) {
     return saveConversationToNotion(analyzedData);
+  } else {
+    console.log("Task missing, skipping Notion save.");
+    return null;
   }
 }
